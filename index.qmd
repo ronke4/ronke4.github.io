@@ -1,0 +1,17 @@
+---
+title: "Ronnie Keene"
+---
+
+## Data Science at UChicago
+
+I'm a data science student interested in applied machine learning,
+predictive modeling, and using data to solve real-world problems.
+
+## Featured Projects
+
+### Predicting 311 Wage Complaint Resolution Times
+
+Can information available when a 311 wage complaint is submitted predict
+how long the case will remain open?
+
+[View project](projects/wage-complaint-resolution.qmd)

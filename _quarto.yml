@@ -1,0 +1,19 @@
+project:
+  type: website
+  execute-dir: project
+
+website:
+  title: "Ronnie Keene"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: about.qmd
+        text: About
+      - href: projects/wage-complaint-resolution.qmd
+        text: Projects
+
+format:
+  html:
+    theme: cosmo
+    toc: true

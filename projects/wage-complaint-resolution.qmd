@@ -1,0 +1,670 @@
+---
+title: "Predicting Wage Complaint Resolution Times"
+subtitle: "From Linear Regression to Survival Analysis"
+author: "Ronnie Keene"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    fig-align: center
+    df-print: paged
+execute:
+  warning: false
+  message: false
+jupyter: python3
+---
+
+## Overview
+
+How much can the information available in a 311 wage complaint tell us about how long that complaint will remain open?
+
+I explored this question using **374 wage complaints** and a set of features describing the issues raised in each complaint, the quality and content of its written description, and characteristics such as whether multiple workers were involved. The complaints were taken from a backend version of the City of Chicago's 311 system. This backend access featured complaints encrypted by the Office of Labor Standards, but I was still able to read each complaint's "description" field. These descriptions formed the basis for each complaint's features. The date range within which complaints were opened spanned from July 17, 2025 to July 17, 2026. 
+
+I began with ordinary linear regression on completed complaints, then moved to survival analysis so that complaints still open at the end of the observation period could remain in the analysis as right-censored observations.
+
+The modeling results are intentionally modest. The linear models did not generalize well, and the survival models achieved only moderate ranking performance. The more important result was methodological: **time-to-resolution is better framed as a censored time-to-event problem than as an ordinary regression problem that discards every complaint still open.**
+
+### Tools
+
+Python, pandas, NumPy, scikit-learn, matplotlib, and `lifelines`.
+
+```{python}
+#| label: imports
+#| echo: false
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import KFold, cross_val_score, train_test_split
+
+from lifelines import (
+    KaplanMeierFitter,
+    WeibullAFTFitter,
+    LogNormalAFTFitter,
+    LogLogisticAFTFitter
+)
+from lifelines.statistics import logrank_test
+from lifelines.utils import k_fold_cross_validation
+```
+
+## Data and Feature Engineering
+
+The source data contain timestamps for when each complaint was opened and, when applicable, closed. The remaining variables are primarily binary indicators describing the complaint.
+
+The issue indicators include categories such as overtime, minimum wage, final paycheck, deductions or benefits, retaliation, tips, payroll records, and leave or vacation pay. Additional engineered variables describe features of the complaint narrative, including whether evidence was mentioned, whether multiple workers were involved, and an ordinal description-quality score.
+
+```{python}
+#| label: load-data
+#| echo: true
+
+DATA_PATH = '../data/complaints_dummy_variables.csv'
+
+complaints = pd.read_csv(DATA_PATH)
+
+complaints["closed_status"] = (
+    complaints["Date/Time Closed"].notna().astype(int)
+)
+
+complaints["Date/Time Opened"] = pd.to_datetime(
+    complaints["Date/Time Opened"],
+    format="%Y-%m-%d %H:%M:%S"
+)
+
+complaints["Date/Time Closed"] = pd.to_datetime(
+    complaints["Date/Time Closed"],
+    format="%Y-%m-%d %H:%M:%S"
+)
+
+complaints["completion_duration"] = (
+    complaints["Date/Time Closed"] - complaints["Date/Time Opened"]
+).dt.total_seconds() / 86400
+
+complaints["description_blank"] = (
+    complaints["description_quality"].isna().astype(int)
+)
+
+complaints["description_quality"] = (
+    complaints["description_quality"] + 1
+).fillna(0)
+
+complaints = pd.get_dummies(
+    complaints,
+    columns=["description_quality"],
+    dtype=int
+)
+
+complaints = complaints.rename(
+    columns={"Unclear": "ambiguous_primary"}
+)
+```
+
+```{python}
+#| label: sample-summary
+#| echo: false
+
+n_total = len(complaints)
+n_closed = int(complaints["closed_status"].sum())
+n_open = n_total - n_closed
+
+pd.DataFrame({
+    "Status": ["All complaints", "Closed", "Still open"],
+    "Count": [n_total, n_closed, n_open]
+})
+```
+
+The dataset contains **374 complaints: 252 closed complaints and 122 complaints that were still open** at the censoring point used in the analysis. That distinction becomes important later.
+
+## First Approach: Ordinary Linear Regression
+
+### Modeling Only Completed Complaints
+
+My first approach treated completion time as a standard continuous response variable. Because an unresolved complaint does not yet have a final completion time, this required removing every complaint that was still open.
+
+```{python}
+#| label: completed-cases
+#| echo: false
+
+completed = complaints.loc[
+    complaints["closed_status"] == 1
+].copy()
+
+completed["completion_duration"].describe()
+```
+
+Among the completed complaints, the mean observed completion time in the notebook was approximately **37.4 days**. The distribution was also right-skewed.
+
+```{python}
+#| label: completion-histogram
+#| fig-cap: "Distribution of resolution times among completed complaints."
+#| echo: false
+
+plt.figure(figsize=(8, 5))
+plt.hist(completed["completion_duration"], bins=25)
+plt.xlabel("Completion duration (days)")
+plt.ylabel("Number of complaints")
+plt.show()
+```
+
+### Full Regression Baseline
+
+For the initial multivariable model, I used issue indicators, complaint-characteristic indicators, and dummy variables for description quality. I excluded `issue_count` from the full model after diagnosing multicollinearity with the individual issue indicators. The all-zero description-quality category serves as the reference category.
+
+```{python}
+#| label: regression-predictors
+#| echo: false
+
+regression_predictors = [
+    "break_deduction",
+    "deductions_or_benefits",
+    "final_paycheck",
+    "leave_or_vacation_pay",
+    "minimum_wage",
+    "misclassification",
+    "overtime",
+    "payroll_records",
+    "regular_wages_unpaid",
+    "retaliation",
+    "tips",
+    "training_or_off_clock",
+    "ambiguous_primary",
+    "cross_ordinance",
+    "employ_cannot_pay",
+    "employer_unreachable",
+    "evidence_mentioned",
+    "joint_employer_or_intermediary",
+    "long_or_repeated_period",
+    "multiple_workers",
+    "description_quality_1.0",
+    "description_quality_2.0",
+    "description_quality_3.0",
+    "description_quality_4.0"
+]
+
+X = completed[regression_predictors]
+y = completed["completion_duration"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.20,
+    random_state=518
+)
+
+linear_model = LinearRegression()
+linear_model.fit(X_train, y_train)
+
+y_pred = linear_model.predict(X_test)
+```
+
+```{python}
+#| label: regression-test-results
+#| echo: false
+
+test_results = pd.DataFrame({
+    "Metric": ["R²", "MAE (days)", "RMSE (days)"],
+    "Test result": [
+        r2_score(y_test, y_pred),
+        mean_absolute_error(y_test, y_pred),
+        np.sqrt(mean_squared_error(y_test, y_pred))
+    ]
+})
+
+test_results
+```
+
+In the original notebook, the holdout model produced:
+
+- **R² = -0.216**
+- **MAE = 30.8 days**
+- **RMSE = 45.8 days**
+
+A negative test R² means the fitted model generalized worse than simply predicting the test set using a constant mean benchmark.
+
+### Cross-Validation
+I also evaluated the model with five-fold cross-validation on the training set.
+
+```{python}
+#| label: regression-cv
+#| echo: false
+
+kf = KFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=518
+)
+
+cv_r2 = cross_val_score(
+    linear_model,
+    X_train,
+    y_train,
+    cv=kf,
+    scoring="r2"
+)
+
+cv_mae = -cross_val_score(
+    linear_model,
+    X_train,
+    y_train,
+    cv=kf,
+    scoring="neg_mean_absolute_error"
+)
+
+pd.DataFrame({
+    "Metric": ["Mean CV R²", "SD of CV R²", "Mean CV MAE (days)"],
+    "Value": [cv_r2.mean(), cv_r2.std(), cv_mae.mean()]
+})
+```
+
+The original five folds produced a **mean CV R² of -0.176** and a **mean CV MAE of 26.2 days**. Performance varied substantially across folds, reinforcing the conclusion that the available intake features did not support a reliable linear prediction of final completion time.
+
+### Trying Simpler Specifications
+
+I tested whether the poor performance was mainly a consequence of the large predictor set or the skewed response. The notebook compared models using only issue count, only description quality, a square-root transformation of completion time, and a smaller set of issue indicators.
+
+```{python}
+#| label: regression-alternatives
+#| echo: false
+
+alternative_results = pd.DataFrame({
+    "Specification": [
+        "Full intake-feature model",
+        "Issue count only",
+        "Description quality only",
+        "Full model, sqrt(response)",
+        "Issue count only, sqrt(response)",
+        "Issue indicators only, sqrt(response)"
+    ],
+    "Mean 5-fold CV R²": [
+        -0.1761,
+        -0.0431,
+        -0.0593,
+        -0.1578,
+        -0.0101,
+        -0.0567
+    ]
+})
+
+alternative_results
+```
+
+None of these specifications produced positive mean cross-validated R². Transforming the response improved its shape but did **not** solve the underlying prediction problem.
+
+## Why Change the Modeling Framework?
+
+The linear-regression experiment exposed a more fundamental problem.
+
+To use ordinary regression, I had removed **122 unresolved complaints — nearly one-third of the dataset** — solely because their final completion times were not yet known. Those complaints are not missing in the usual sense. Each one tells us something important: the complaint had remained open for *at least* a known amount of time.
+
+That is a classic **right-censoring** problem.
+
+Survival analysis allows those observations to contribute information without pretending that their eventual closure times are already known.
+
+## Survival Analysis
+
+### Constructing the Time-to-Event Data
+
+For closed complaints, the event time is the elapsed time between opening and closure. For complaints still open, the duration is measured from opening until the censoring cutoff.
+
+The notebook used **July 17, 2026 at 11:31 AM**, the latest observed closure timestamp in the data, as its cutoff.
+
+```{python}
+#| label: survival-data
+#| echo: true
+
+survival_df = complaints.copy()
+
+cutoff = pd.Timestamp("2026-07-17 11:31:00")
+
+survival_df["event_observed"] = (
+    survival_df["Date/Time Closed"].notna().astype(int)
+)
+
+survival_df["end_time"] = (
+    survival_df["Date/Time Closed"].fillna(cutoff)
+)
+
+survival_df["days_open"] = (
+    survival_df["end_time"] - survival_df["Date/Time Opened"]
+).dt.total_seconds() / 86400
+```
+
+Here, `event_observed = 1` means the complaint closed during the observation period; `event_observed = 0` means it was still open at the cutoff.
+
+### Kaplan–Meier Estimate
+
+I first estimated the overall survival curve nonparametrically using Kaplan–Meier estimation. In this setting, the survival function represents the probability that a complaint remains open beyond a given number of days.
+
+```{python}
+#| label: overall-km
+#| fig-cap: "Kaplan–Meier estimate of the probability that a complaint remains open."
+#| echo: false
+
+km = KaplanMeierFitter()
+km.fit(
+    survival_df["days_open"],
+    event_observed=survival_df["event_observed"],
+    label="All complaints"
+)
+
+ax = km.plot_survival_function()
+ax.set_xlabel("Days since complaint opened")
+ax.set_ylabel("Probability complaint remains open")
+plt.show()
+
+km.median_survival_time_
+```
+
+The estimated median time to closure was approximately **39.85 days**. In other words, the Kaplan–Meier estimate falls to 0.5 at roughly 40 days.
+
+## Parametric Accelerate Failure-Time Models
+
+To model how complaint characteristics relate to time-to-closure while accommodating censoring, I compared three parametric **accelerated failure-time (AFT)** specifications:
+
+1. Weibull
+2. Log-normal
+3. Log-logistic
+
+The full specification used 24 intake and complaint-description features.
+
+```{python}
+#| label: aft-predictors
+#| echo: false
+
+survival_predictors = [
+    "break_deduction",
+    "deductions_or_benefits",
+    "final_paycheck",
+    "leave_or_vacation_pay",
+    "minimum_wage",
+    "misclassification",
+    "overtime",
+    "payroll_records",
+    "regular_wages_unpaid",
+    "retaliation",
+    "tips",
+    "training_or_off_clock",
+    "ambiguous_primary",
+    "cross_ordinance",
+    "employ_cannot_pay",
+    "employer_unreachable",
+    "evidence_mentioned",
+    "joint_employer_or_intermediary",
+    "long_or_repeated_period",
+    "multiple_workers",
+    "description_quality_1.0",
+    "description_quality_2.0",
+    "description_quality_3.0",
+    "description_quality_4.0"
+]
+
+aft_df = survival_df[
+    survival_predictors + ["days_open", "event_observed"]
+].copy()
+
+train_aft, test_aft = train_test_split(
+    aft_df,
+    test_size=0.20,
+    random_state=518,
+    stratify=aft_df["event_observed"]
+)
+```
+
+```{python}
+#| label: fit-aft-models
+#| echo: false
+
+aft_models = {
+    "Weibull": WeibullAFTFitter(),
+    "Log-normal": LogNormalAFTFitter(),
+    "Log-logistic": LogLogisticAFTFitter()
+}
+
+for model in aft_models.values():
+    model.fit(
+        train_aft,
+        duration_col="days_open",
+        event_col="event_observed"
+    )
+```
+
+### Holdout Performance
+
+I evaluated discrimination using the concordance index (C-index). A higher C-index means the model is better at correctly ranking which of two complaints remains open longer.
+
+```{python}
+#| label: aft-holdout-results
+#| echo: false
+
+holdout_rows = []
+
+for name, model in aft_models.items():
+    holdout_rows.append({
+        "Model": name,
+        "Test C-index": model.score(
+            test_aft,
+            scoring_method="concordance_index"
+        ),
+        "Test log-likelihood": model.score(
+            test_aft,
+            scoring_method="log_likelihood"
+        ),
+        "Training AIC": model.AIC_
+    })
+
+holdout_results = pd.DataFrame(holdout_rows)
+holdout_results
+```
+
+In the notebook, the log-normal model had the highest single holdout C-index (**0.621**), followed by log-logistic (**0.606**) and Weibull (**0.577**).
+
+A single train-test split can be noisy, however, so I also compared the models across five folds.
+
+### Five-Fold Cross-Validation
+
+```{python}
+#| label: aft-cross-validation
+#| echo: false
+
+cv_rows = []
+
+for name, model in {
+    "Weibull": WeibullAFTFitter(),
+    "Log-normal": LogNormalAFTFitter(),
+    "Log-logistic": LogLogisticAFTFitter()
+}.items():
+
+    scores = k_fold_cross_validation(
+        model,
+        aft_df,
+        duration_col="days_open",
+        event_col="event_observed",
+        k=5,
+        scoring_method="concordance_index",
+        seed=518
+    )
+
+    cv_rows.append({
+        "Model": name,
+        "Mean CV C-index": np.mean(scores),
+        "SD": np.std(scores)
+    })
+
+cv_results = pd.DataFrame(cv_rows)
+cv_results
+```
+
+The notebook produced the following mean C-indices:
+
+| Model | Mean 5-fold C-index | SD |
+|---|---:|---:|
+| Weibull | 0.542 | 0.040 |
+| Log-normal | 0.523 | 0.032 |
+| Log-logistic | 0.540 | 0.044 |
+
+This changes the interpretation of the single holdout result. Although the log-normal model performed best on that particular test set, its advantage did not persist across folds. **Overall discrimination was modest, and the ranking of the three parametric models was not especially stable.**
+
+That is a more useful conclusion than choosing a "winner" from one split.
+
+## Exploring Differences in Resolution Curves
+
+I also used Kaplan–Meier curves and log-rank tests to explore whether particular binary complaint characteristics were associated with visibly different time-to-closure distributions.
+
+```{python}
+#| label: km-comparison-function
+#| echo: false
+
+def km_comparison_table(df, variable):
+    rows = []
+
+    for value in [0, 1]:
+        group = df[df[variable] == value]
+
+        km_group = KaplanMeierFitter()
+        km_group.fit(
+            group["days_open"],
+            event_observed=group["event_observed"]
+        )
+
+        rows.append({
+            "Variable": variable,
+            "Value": value,
+            "N": len(group),
+            "Observed closures": int(group["event_observed"].sum()),
+            "KM median days": km_group.median_survival_time_
+        })
+
+    g0 = df[df[variable] == 0]
+    g1 = df[df[variable] == 1]
+
+    test = logrank_test(
+        g0["days_open"],
+        g1["days_open"],
+        event_observed_A=g0["event_observed"],
+        event_observed_B=g1["event_observed"]
+    )
+
+    result = pd.DataFrame(rows)
+    result["Log-rank p-value"] = test.p_value
+
+    return result
+```
+
+Six variables produced log-rank p-values below 0.05 in the exploratory screen:
+
+```{python}
+#| label: exploratory-km-results
+#| echo: false
+
+exploratory_variables = [
+    "deductions_or_benefits",
+    "leave_or_vacation_pay",
+    "overtime",
+    "ambiguous_primary",
+    "multiple_workers",
+    "description_quality_4.0"
+]
+
+km_results = pd.concat(
+    [
+        km_comparison_table(survival_df, variable)
+        for variable in exploratory_variables
+    ],
+    ignore_index=True
+)
+
+km_results
+```
+
+The original notebook produced several large differences in estimated median time-to-closure. For example:
+
+- Complaints with an **overtime** indicator had an estimated median of about **178.0 days**, compared with **38.6 days** for complaints without that indicator (`p ≈ 0.022`).
+- Complaints with a **leave or vacation pay** indicator had an estimated median of about **103.1 days**, compared with **38.3 days** for complaints without it (`p ≈ 0.0079`).
+- Complaints in the highest encoded **description-quality category** had an estimated median of about **74.1 days**, compared with **36.5 days** for other complaints (`p < 0.001`).
+- Complaints involving **multiple workers** had an estimated median of about **47.1 days**, compared with **38.6 days** otherwise (`p ≈ 0.050`).
+
+These comparisons are **exploratory associations, not causal effects**. They were obtained by screening multiple variables separately, and some categories may contain relatively few complaints. The p-values should therefore be interpreted cautiously rather than as definitive evidence that a particular complaint characteristic causes longer or shorter resolution.
+
+### Example Kaplan–Meier Comparison
+
+```{python}
+#| label: km-overtime
+#| fig-cap: "Estimated time-to-closure distributions for complaints with and without an overtime indicator."
+#| echo: false
+
+variable = "overtime"
+
+fig, ax = plt.subplots(figsize=(8, 5))
+
+for value in [0, 1]:
+    group = survival_df[survival_df[variable] == value]
+
+    km_group = KaplanMeierFitter()
+    km_group.fit(
+        group["days_open"],
+        event_observed=group["event_observed"],
+        label=f"{variable} = {value}"
+    )
+
+    km_group.plot_survival_function(ax=ax)
+
+ax.set_xlabel("Days since complaint opened")
+ax.set_ylabel("Probability complaint remains open")
+plt.show()
+```
+
+## An Exploratory Reduced Model
+
+After the univariate Kaplan–Meier screen, I also fit AFT models using the six variables whose log-rank tests had p-values at or below 0.05.
+
+Those reduced models produced mean five-fold C-indices of approximately:
+
+| Model | Mean 5-fold C-index |
+|---|---:|
+| Weibull | 0.578 |
+| Log-normal | 0.572 |
+| Log-logistic | 0.575 |
+
+These numbers are encouraging relative to the full 24-feature specification, but I would **not treat them as final validation performance**. The variables were selected after looking at the full dataset, so the selection step itself had access to information that later appeared in the evaluation folds.
+
+A cleaner follow-up would perform feature screening **inside each training fold** or use a fully prespecified reduced feature set before evaluating on untouched data.
+
+## What I Learned
+
+This project changed direction because the first model failed.
+
+The initial linear-regression models had negative cross-validated R² across every specification I tried. Rather than treating that as a reason to keep tuning the same model, I reconsidered the structure of the outcome itself.
+
+That led to three main conclusions:
+
+1. **The available complaint metadata have limited predictive power for exact resolution time.** Neither the large linear model nor simpler transformed variants generalized reliably.
+
+2. **Survival analysis is a better formulation of the problem.** It preserves information from complaints that remain unresolved rather than dropping nearly one-third of the dataset.
+
+3. **Some complaint characteristics are associated with different resolution-time distributions, but prediction remains difficult.** AFT models achieved only modest C-index performance, and exploratory Kaplan–Meier comparisons should not be interpreted causally.
+
+For an operational setting, that means these intake features may be more useful for **risk stratification and identifying potentially long-running cases** than for promising a precise number of days until closure.
+
+## Limitations and Next Steps
+
+There are several reasons to keep the results modest.
+
+- **Small sample:** The dataset contains 374 complaints, only 252 of which had observed closures.
+- **Limited predictors:** Intake metadata may omit important drivers of processing time, such as staffing, investigator workload, employer responsiveness, legal complexity, or changes in administrative procedure.
+- **Administrative censoring:** The notebook used the latest observed closure time as the censoring cutoff. If the true data-extraction timestamp is available, that would be a more defensible administrative cutoff.
+- **Parametric assumptions:** Weibull, log-normal, and log-logistic AFT models each impose assumptions about the distribution of survival times.
+- **Exploratory multiple testing:** The Kaplan–Meier variable screen tested many predictors independently, so individual p-values should not be overinterpreted.
+- **Feature-selection leakage in the reduced model:** The reduced feature set was identified using the full dataset before cross-validation. A future version should nest selection within training folds.
+- **No causal interpretation:** The analysis is observational. Differences in survival curves do not establish that any complaint characteristic causes a delay.
+
+A next iteration could compare regularized survival models, survival forests, or boosting methods; use nested cross-validation for feature selection; and incorporate operational variables that better capture the administrative process itself.
+
+## Bottom Line
+
+The strongest result was not a high accuracy score. It was recognizing that the original regression formulation was throwing away exactly the cases that make resolution-time modeling difficult.
+
+**Moving from ordinary regression to censored time-to-event modeling allowed all 374 complaints to contribute information and produced a more defensible representation of the real operational problem.**
