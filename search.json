@@ -1,0 +1,114 @@
+[
+  {
+    "objectID": "projects/wage-complaint-resolution.html",
+    "href": "projects/wage-complaint-resolution.html",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "",
+    "text": "How much can the information available in a 311 wage complaint tell us about how long that complaint will remain open?\nI explored this question using 374 wage complaints and a set of features describing the issues raised in each complaint, the quality and content of its written description, and characteristics such as whether multiple workers were involved. The complaints were taken from a backend version of the City of Chicago’s 311 system. This backend access featured complaints encrypted by the Office of Labor Standards, but I was still able to read each complaint’s “description” field. These descriptions formed the basis for each complaint’s features. The date range within which complaints were opened spanned from July 17, 2025 to July 17, 2026.\nI began with ordinary linear regression on completed complaints, then moved to survival analysis so that complaints still open at the end of the observation period could remain in the analysis as right-censored observations.\nThe modeling results are intentionally modest. The linear models did not generalize well, and the survival models achieved only moderate ranking performance. The more important result was methodological: time-to-resolution is better framed as a censored time-to-event problem than as an ordinary regression problem that discards every complaint still open.\n\n\nPython, pandas, NumPy, scikit-learn, matplotlib, and lifelines."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#overview",
+    "href": "projects/wage-complaint-resolution.html#overview",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "",
+    "text": "How much can the information available in a 311 wage complaint tell us about how long that complaint will remain open?\nI explored this question using 374 wage complaints and a set of features describing the issues raised in each complaint, the quality and content of its written description, and characteristics such as whether multiple workers were involved. The complaints were taken from a backend version of the City of Chicago’s 311 system. This backend access featured complaints encrypted by the Office of Labor Standards, but I was still able to read each complaint’s “description” field. These descriptions formed the basis for each complaint’s features. The date range within which complaints were opened spanned from July 17, 2025 to July 17, 2026.\nI began with ordinary linear regression on completed complaints, then moved to survival analysis so that complaints still open at the end of the observation period could remain in the analysis as right-censored observations.\nThe modeling results are intentionally modest. The linear models did not generalize well, and the survival models achieved only moderate ranking performance. The more important result was methodological: time-to-resolution is better framed as a censored time-to-event problem than as an ordinary regression problem that discards every complaint still open.\n\n\nPython, pandas, NumPy, scikit-learn, matplotlib, and lifelines."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#data-and-feature-engineering",
+    "href": "projects/wage-complaint-resolution.html#data-and-feature-engineering",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "Data and Feature Engineering",
+    "text": "Data and Feature Engineering\nThe source data contain timestamps for when each complaint was opened and, when applicable, closed. The remaining variables are primarily binary indicators describing the complaint.\nThe issue indicators include categories such as overtime, minimum wage, final paycheck, deductions or benefits, retaliation, tips, payroll records, and leave or vacation pay. Additional engineered variables describe features of the complaint narrative, including whether evidence was mentioned, whether multiple workers were involved, and an ordinal description-quality score.\n\n\nShow code\nDATA_PATH = 'data/complaints_dummy_variables.csv'\n\ncomplaints = pd.read_csv(DATA_PATH)\n\ncomplaints[\"closed_status\"] = (\n    complaints[\"Date/Time Closed\"].notna().astype(int)\n)\n\ncomplaints[\"Date/Time Opened\"] = pd.to_datetime(\n    complaints[\"Date/Time Opened\"],\n    format=\"%Y-%m-%d %H:%M:%S\"\n)\n\ncomplaints[\"Date/Time Closed\"] = pd.to_datetime(\n    complaints[\"Date/Time Closed\"],\n    format=\"%Y-%m-%d %H:%M:%S\"\n)\n\ncomplaints[\"completion_duration\"] = (\n    complaints[\"Date/Time Closed\"] - complaints[\"Date/Time Opened\"]\n).dt.total_seconds() / 86400\n\ncomplaints[\"description_blank\"] = (\n    complaints[\"description_quality\"].isna().astype(int)\n)\n\ncomplaints[\"description_quality\"] = (\n    complaints[\"description_quality\"] + 1\n).fillna(0)\n\ncomplaints = pd.get_dummies(\n    complaints,\n    columns=[\"description_quality\"],\n    dtype=int\n)\n\ncomplaints = complaints.rename(\n    columns={\"Unclear\": \"ambiguous_primary\"}\n)\n\n\n\n\n\n\n\n\n\n\n\nStatus\nCount\n\n\n\n\n0\nAll complaints\n374\n\n\n1\nClosed\n252\n\n\n2\nStill open\n122\n\n\n\n\n\n\n\nThe dataset contains 374 complaints: 252 closed complaints and 122 complaints that were still open at the censoring point used in the analysis. That distinction becomes important later."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#first-approach-ordinary-linear-regression",
+    "href": "projects/wage-complaint-resolution.html#first-approach-ordinary-linear-regression",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "First Approach: Ordinary Linear Regression",
+    "text": "First Approach: Ordinary Linear Regression\n\nModeling Only Completed Complaints\nMy first approach treated completion time as a standard continuous response variable. Because an unresolved complaint does not yet have a final completion time, this required removing every complaint that was still open.\n\n\ncount    252.000000\nmean      37.379823\nstd       38.427271\nmin        0.001389\n25%       10.673958\n50%       33.018750\n75%       42.171528\nmax      260.274306\nName: completion_duration, dtype: float64\n\n\nAmong the completed complaints, the mean observed completion time in the notebook was approximately 37.4 days. The distribution was also right-skewed.\n\n\n\n\n\nDistribution of resolution times among completed complaints.\n\n\n\n\n\n\nFull Regression Baseline\nFor the initial multivariable model, I used issue indicators, complaint-characteristic indicators, and dummy variables for description quality. I excluded issue_count from the full model after diagnosing multicollinearity with the individual issue indicators. The all-zero description-quality category serves as the reference category.\n\n\n\n\n\n\n\n\n\nMetric\nTest result\n\n\n\n\n0\nR²\n-0.216150\n\n\n1\nMAE (days)\n30.797938\n\n\n2\nRMSE (days)\n45.811908\n\n\n\n\n\n\n\nIn the original notebook, the holdout model produced:\n\nR² = -0.216\nMAE = 30.8 days\nRMSE = 45.8 days\n\nA negative test R² means the fitted model generalized worse than simply predicting the test set using a constant mean benchmark.\n\n\nCross-Validation\nI also evaluated the model with five-fold cross-validation on the training set.\n\n\n\n\n\n\n\n\n\nMetric\nValue\n\n\n\n\n0\nMean CV R²\n-0.176149\n\n\n1\nSD of CV R²\n0.283964\n\n\n2\nMean CV MAE (days)\n26.209585\n\n\n\n\n\n\n\nThe original five folds produced a mean CV R² of -0.176 and a mean CV MAE of 26.2 days. Performance varied substantially across folds, reinforcing the conclusion that the available intake features did not support a reliable linear prediction of final completion time.\n\n\nTrying Simpler Specifications\nI tested whether the poor performance was mainly a consequence of the large predictor set or the skewed response. The notebook compared models using only issue count, only description quality, a square-root transformation of completion time, and a smaller set of issue indicators.\n\n\n\n\n\n\n\n\n\nSpecification\nMean 5-fold CV R²\n\n\n\n\n0\nFull intake-feature model\n-0.1761\n\n\n1\nIssue count only\n-0.0431\n\n\n2\nDescription quality only\n-0.0593\n\n\n3\nFull model, sqrt(response)\n-0.1578\n\n\n4\nIssue count only, sqrt(response)\n-0.0101\n\n\n5\nIssue indicators only, sqrt(response)\n-0.0567\n\n\n\n\n\n\n\nNone of these specifications produced positive mean cross-validated R². Transforming the response improved its shape but did not solve the underlying prediction problem."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#why-change-the-modeling-framework",
+    "href": "projects/wage-complaint-resolution.html#why-change-the-modeling-framework",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "Why Change the Modeling Framework?",
+    "text": "Why Change the Modeling Framework?\nThe linear-regression experiment exposed a more fundamental problem.\nTo use ordinary regression, I had removed 122 unresolved complaints — nearly one-third of the dataset — solely because their final completion times were not yet known. Those complaints are not missing in the usual sense. Each one tells us something important: the complaint had remained open for at least a known amount of time.\nThat is a classic right-censoring problem.\nSurvival analysis allows those observations to contribute information without pretending that their eventual closure times are already known."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#survival-analysis",
+    "href": "projects/wage-complaint-resolution.html#survival-analysis",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "Survival Analysis",
+    "text": "Survival Analysis\n\nConstructing the Time-to-Event Data\nFor closed complaints, the event time is the elapsed time between opening and closure. For complaints still open, the duration is measured from opening until the censoring cutoff.\nThe notebook used July 17, 2026 at 11:31 AM, the latest observed closure timestamp in the data, as its cutoff.\n\n\nShow code\nsurvival_df = complaints.copy()\n\ncutoff = pd.Timestamp(\"2026-07-17 11:31:00\")\n\nsurvival_df[\"event_observed\"] = (\n    survival_df[\"Date/Time Closed\"].notna().astype(int)\n)\n\nsurvival_df[\"end_time\"] = (\n    survival_df[\"Date/Time Closed\"].fillna(cutoff)\n)\n\nsurvival_df[\"days_open\"] = (\n    survival_df[\"end_time\"] - survival_df[\"Date/Time Opened\"]\n).dt.total_seconds() / 86400\n\n\nHere, event_observed = 1 means the complaint closed during the observation period; event_observed = 0 means it was still open at the cutoff.\n\n\nKaplan–Meier Estimate\nI first estimated the overall survival curve nonparametrically using Kaplan–Meier estimation. In this setting, the survival function represents the probability that a complaint remains open beyond a given number of days.\n\n\n\n\n\nKaplan–Meier estimate of the probability that a complaint remains open.\n\n\n\n\nnp.float64(39.84513888888889)\n\n\nThe estimated median time to closure was approximately 39.85 days. In other words, the Kaplan–Meier estimate falls to 0.5 at roughly 40 days."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#parametric-accelerate-failure-time-models",
+    "href": "projects/wage-complaint-resolution.html#parametric-accelerate-failure-time-models",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "Parametric Accelerate Failure-Time Models",
+    "text": "Parametric Accelerate Failure-Time Models\nTo model how complaint characteristics relate to time-to-closure while accommodating censoring, I compared three parametric accelerated failure-time (AFT) specifications:\n\nWeibull\nLog-normal\nLog-logistic\n\nThe full specification used 24 intake and complaint-description features.\n\nHoldout Performance\nI evaluated discrimination using the concordance index (C-index). A higher C-index means the model is better at correctly ranking which of two complaints remains open longer.\n\n\n\n\n\n\n\n\n\nModel\nTest C-index\nTest log-likelihood\nTraining AIC\n\n\n\n\n0\nWeibull\n0.577079\n-3.320082\n2146.594667\n\n\n1\nLog-normal\n0.621124\n-3.481862\n2215.202074\n\n\n2\nLog-logistic\n0.606292\n-3.386675\n2170.838844\n\n\n\n\n\n\n\nIn the notebook, the log-normal model had the highest single holdout C-index (0.621), followed by log-logistic (0.606) and Weibull (0.577).\nA single train-test split can be noisy, however, so I also compared the models across five folds.\n\n\nFive-Fold Cross-Validation\n\n\n\n\n\n\n\n\n\nModel\nMean CV C-index\nSD\n\n\n\n\n0\nWeibull\n0.542084\n0.040162\n\n\n1\nLog-normal\n0.523215\n0.031702\n\n\n2\nLog-logistic\n0.540076\n0.044157\n\n\n\n\n\n\n\nThe notebook produced the following mean C-indices:\n\n\n\nModel\nMean 5-fold C-index\nSD\n\n\n\n\nWeibull\n0.542\n0.040\n\n\nLog-normal\n0.523\n0.032\n\n\nLog-logistic\n0.540\n0.044\n\n\n\nThis changes the interpretation of the single holdout result. Although the log-normal model performed best on that particular test set, its advantage did not persist across folds. Overall discrimination was modest, and the ranking of the three parametric models was not especially stable.\nThat is a more useful conclusion than choosing a “winner” from one split."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#exploring-differences-in-resolution-curves",
+    "href": "projects/wage-complaint-resolution.html#exploring-differences-in-resolution-curves",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "Exploring Differences in Resolution Curves",
+    "text": "Exploring Differences in Resolution Curves\nI also used Kaplan–Meier curves and log-rank tests to explore whether particular binary complaint characteristics were associated with visibly different time-to-closure distributions.\nSix variables produced log-rank p-values below 0.05 in the exploratory screen:\n\n\n\n\n\n\n\n\n\nVariable\nValue\nN\nObserved closures\nKM median days\nLog-rank p-value\n\n\n\n\n0\ndeductions_or_benefits\n0\n354\n235\n39.846528\n0.018576\n\n\n1\ndeductions_or_benefits\n1\n20\n17\n33.043056\n0.018576\n\n\n2\nleave_or_vacation_pay\n0\n336\n235\n38.282639\n0.007875\n\n\n3\nleave_or_vacation_pay\n1\n38\n17\n103.097222\n0.007875\n\n\n4\novertime\n0\n342\n235\n38.647917\n0.022375\n\n\n5\novertime\n1\n32\n17\n178.027083\n0.022375\n\n\n6\nambiguous_primary\n0\n270\n167\n43.996528\n0.001447\n\n\n7\nambiguous_primary\n1\n104\n85\n36.793750\n0.001447\n\n\n8\nmultiple_workers\n0\n300\n212\n38.647917\n0.049876\n\n\n9\nmultiple_workers\n1\n74\n40\n47.116667\n0.049876\n\n\n10\ndescription_quality_4.0\n0\n259\n189\n36.466667\n0.000091\n\n\n11\ndescription_quality_4.0\n1\n115\n63\n74.100694\n0.000091\n\n\n\n\n\n\n\nThe original notebook produced several large differences in estimated median time-to-closure. For example:\n\nComplaints with an overtime indicator had an estimated median of about 178.0 days, compared with 38.6 days for complaints without that indicator (p ≈ 0.022).\nComplaints with a leave or vacation pay indicator had an estimated median of about 103.1 days, compared with 38.3 days for complaints without it (p ≈ 0.0079).\nComplaints in the highest encoded description-quality category had an estimated median of about 74.1 days, compared with 36.5 days for other complaints (p &lt; 0.001).\nComplaints involving multiple workers had an estimated median of about 47.1 days, compared with 38.6 days otherwise (p ≈ 0.050).\n\nThese comparisons are exploratory associations, not causal effects. They were obtained by screening multiple variables separately, and some categories may contain relatively few complaints. The p-values should therefore be interpreted cautiously rather than as definitive evidence that a particular complaint characteristic causes longer or shorter resolution.\n\nExample Kaplan–Meier Comparison\n\n\n\n\n\nEstimated time-to-closure distributions for complaints with and without an overtime indicator."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#an-exploratory-reduced-model",
+    "href": "projects/wage-complaint-resolution.html#an-exploratory-reduced-model",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "An Exploratory Reduced Model",
+    "text": "An Exploratory Reduced Model\nAfter the univariate Kaplan–Meier screen, I also fit AFT models using the six variables whose log-rank tests had p-values at or below 0.05.\nThose reduced models produced mean five-fold C-indices of approximately:\n\n\n\nModel\nMean 5-fold C-index\n\n\n\n\nWeibull\n0.578\n\n\nLog-normal\n0.572\n\n\nLog-logistic\n0.575\n\n\n\nThese numbers are encouraging relative to the full 24-feature specification, but I would not treat them as final validation performance. The variables were selected after looking at the full dataset, so the selection step itself had access to information that later appeared in the evaluation folds.\nA cleaner follow-up would perform feature screening inside each training fold or use a fully prespecified reduced feature set before evaluating on untouched data."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#what-i-learned",
+    "href": "projects/wage-complaint-resolution.html#what-i-learned",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "What I Learned",
+    "text": "What I Learned\nThis project changed direction because the first model failed.\nThe initial linear-regression models had negative cross-validated R² across every specification I tried. Rather than treating that as a reason to keep tuning the same model, I reconsidered the structure of the outcome itself.\nThat led to three main conclusions:\n\nThe available complaint metadata have limited predictive power for exact resolution time. Neither the large linear model nor simpler transformed variants generalized reliably.\nSurvival analysis is a better formulation of the problem. It preserves information from complaints that remain unresolved rather than dropping nearly one-third of the dataset.\nSome complaint characteristics are associated with different resolution-time distributions, but prediction remains difficult. AFT models achieved only modest C-index performance, and exploratory Kaplan–Meier comparisons should not be interpreted causally.\n\nFor an operational setting, that means these intake features may be more useful for risk stratification and identifying potentially long-running cases than for promising a precise number of days until closure."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#limitations-and-next-steps",
+    "href": "projects/wage-complaint-resolution.html#limitations-and-next-steps",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "Limitations and Next Steps",
+    "text": "Limitations and Next Steps\nThere are several reasons to keep the results modest.\n\nSmall sample: The dataset contains 374 complaints, only 252 of which had observed closures.\nLimited predictors: Intake metadata may omit important drivers of processing time, such as staffing, investigator workload, employer responsiveness, legal complexity, or changes in administrative procedure.\nAdministrative censoring: The notebook used the latest observed closure time as the censoring cutoff. If the true data-extraction timestamp is available, that would be a more defensible administrative cutoff.\nParametric assumptions: Weibull, log-normal, and log-logistic AFT models each impose assumptions about the distribution of survival times.\nExploratory multiple testing: The Kaplan–Meier variable screen tested many predictors independently, so individual p-values should not be overinterpreted.\nFeature-selection leakage in the reduced model: The reduced feature set was identified using the full dataset before cross-validation. A future version should nest selection within training folds.\nNo causal interpretation: The analysis is observational. Differences in survival curves do not establish that any complaint characteristic causes a delay.\n\nA next iteration could compare regularized survival models, survival forests, or boosting methods; use nested cross-validation for feature selection; and incorporate operational variables that better capture the administrative process itself."
+  },
+  {
+    "objectID": "projects/wage-complaint-resolution.html#bottom-line",
+    "href": "projects/wage-complaint-resolution.html#bottom-line",
+    "title": "Predicting Wage Complaint Resolution Times",
+    "section": "Bottom Line",
+    "text": "Bottom Line\nThe strongest result was not a high accuracy score. It was recognizing that the original regression formulation was throwing away exactly the cases that make resolution-time modeling difficult.\nMoving from ordinary regression to censored time-to-event modeling allowed all 374 complaints to contribute information and produced a more defensible representation of the real operational problem."
+  },
+  {
+    "objectID": "about.html",
+    "href": "about.html",
+    "title": "Will update later",
+    "section": "",
+    "text": "Will update later"
+  },
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "Ronnie Keene",
+    "section": "",
+    "text": "I’m a data science student interested in applied machine learning, predictive modeling, and using data to solve real-world problems."
+  },
+  {
+    "objectID": "index.html#data-science-at-uchicago",
+    "href": "index.html#data-science-at-uchicago",
+    "title": "Ronnie Keene",
+    "section": "",
+    "text": "I’m a data science student interested in applied machine learning, predictive modeling, and using data to solve real-world problems."
+  },
+  {
+    "objectID": "index.html#featured-projects",
+    "href": "index.html#featured-projects",
+    "title": "Ronnie Keene",
+    "section": "Featured Projects",
+    "text": "Featured Projects\n\nPredicting 311 Wage Complaint Resolution Times\nCan information available when a 311 wage complaint is submitted predict how long the case will remain open?\nView project"
+  }
+]
